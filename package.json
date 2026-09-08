@@ -7,9 +7,27 @@
   "engines": [
     {
       "path": "engines/qwant",
-      "name": "qwant",
-      "description": "",
-      "version": "1.0.1"
+      "name": "Qwant",
+      "description": "Search using Qwant",
+      "version": "1.1.0"
+    },
+    {
+      "path": "engines/qwant-images",
+      "name": "qwant-images",
+      "description": "Search images using Qwant",
+      "version": "1.0.0"
+    },
+    {
+      "path": "engines/qwant-news",
+      "name": "qwant-news",
+      "description": "Search news using Qwant",
+      "version": "1.0.0"
+    },
+    {
+      "path": "engines/qwant-videos",
+      "name": "qwant-videos",
+      "description": "Search videos using Qwant",
+      "version": "1.0.0"
     }
   ],
   "transports": [],
