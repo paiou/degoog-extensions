@@ -1,0 +1,17 @@
+{
+  "name": "degoog",
+  "description": "degoog extensions for degoog",
+  "author": "",
+  "plugins": [],
+  "themes": [],
+  "engines": [
+    {
+      "path": "engines/qwant",
+      "name": "qwant",
+      "description": "",
+      "version": "1.0.0"
+    }
+  ],
+  "transports": [],
+  "autocomplete": []
+}
