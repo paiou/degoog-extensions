@@ -47,12 +47,35 @@ function formatLocale(lang?: string): string {
   return map[lower] ?? `${lower}_${lower.toUpperCase()}`
 }
 
+export const description =
+  "Qwant web search engine. Note: Qwant uses DataDome bot protection on its web search API. If querying directly from a datacenter IP or server, requests may be challenged (HTTP 403). Use a browser transport (such as lolcat-4play or Camoufox), a proxy, or provide a browser datadome cookie in settings."
+
+let cachedDataDome: string | null = null
+
 export const engine = {
-  name: "qwant",
+  name: "Qwant",
   bangShortcut: "qwant",
   safeSearch: "moderate",
+  datadomeCookie: "",
 
   settingsSchema: [
+    {
+      key: "outgoingTransport",
+      label: "Outgoing HTTP client transport",
+      type: "select",
+      options: ["curl-impersonate", "fetch", "curl", "curl-fallback"],
+      default: "curl-impersonate",
+      advanced: true,
+      description:
+        "Select an outgoing transport. 'curl-impersonate' (pre-installed in Degoog) is recommended on residential IPs to match browser TLS fingerprints and bypass DataDome.",
+    },
+    {
+      key: "datadomeCookie",
+      label: "DataDome Cookie",
+      type: "password",
+      description:
+        "Optional: datadome cookie from your browser (inspect network requests on qwant.com to copy the datadome cookie value) to bypass challenges without a browser transport.",
+    },
     {
       key: "safeSearch",
       label: "Safe Search",
@@ -66,6 +89,9 @@ export const engine = {
   configure(settings: Record<string, any>) {
     if (typeof settings?.safeSearch === "string") {
       this.safeSearch = settings.safeSearch
+    }
+    if (typeof settings?.datadomeCookie === "string") {
+      this.datadomeCookie = settings.datadomeCookie.trim()
     }
   },
 
@@ -126,6 +152,10 @@ export const engine = {
 
       const url = `https://api.qwant.com/v3/search/web?${params.toString()}`
 
+      const activeCookie =
+        (this?.datadomeCookie ?? engine.datadomeCookie)?.trim() ||
+        cachedDataDome
+
       const headers: Record<string, string> = {
         Accept: "application/json, text/plain, */*",
         "Accept-Language": context?.buildAcceptLanguage?.() || "en-US,en;q=0.9",
@@ -134,9 +164,54 @@ export const engine = {
           "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
         Referer: "https://www.qwant.com/",
         Origin: "https://www.qwant.com",
+        ...(activeCookie ? { Cookie: `datadome=${activeCookie}` } : {}),
       }
 
       const response = await doFetch(url, { headers })
+
+      // Update cached datadome cookie if returned by server
+      const setCookie =
+        response.headers.get("set-cookie") ||
+        response.headers.get("x-set-cookie") ||
+        ""
+      const ddMatch = setCookie.match(/datadome=([^;]+)/)
+      if (ddMatch) {
+        cachedDataDome = ddMatch[1]
+      }
+
+      // Check if blocked by DataDome CAPTCHA/interstitial challenge
+      if (response.status === 403) {
+        let isDataDome = response.headers.get("x-datadome") === "protected"
+        if (!isDataDome) {
+          try {
+            const clone = response.clone ? response.clone() : response
+            const text = await clone.text()
+            if (
+              text.includes("captcha") ||
+              text.includes("datadome") ||
+              text.includes("challenge")
+            ) {
+              isDataDome = true
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (isDataDome) {
+          if (context?.engineError) {
+            throw context.engineError(
+              "captcha",
+              `${this?.name ?? engine.name} returned a DataDome CAPTCHA challenge. Upstream requests from datacenter/server IPs are blocked by DataDome. To resolve: configure an anti-bot browser transport (such as lolcat-4play or Camoufox), route via a proxy, or provide a datadome cookie in engine settings.`,
+              { httpStatus: 403, engine: this?.name ?? engine.name }
+            )
+          }
+          throw new Error(
+            `${this?.name ?? engine.name} returned a DataDome CAPTCHA challenge (HTTP 403)`
+          )
+        }
+      }
+
       context?.sentinel?.(response, this?.name ?? engine.name)
 
       let data: any
