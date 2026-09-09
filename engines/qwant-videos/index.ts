@@ -67,7 +67,7 @@ export const description =
 let cachedDataDome: string | null = null
 
 export const engine = {
-  name: "qwant-videos",
+  name: "Qwant Videos",
   bangShortcut: "qwant-videos",
   safeSearch: "moderate",
   datadomeCookie: "",
