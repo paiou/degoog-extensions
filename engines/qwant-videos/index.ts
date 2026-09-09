@@ -64,7 +64,46 @@ function formatLocale(lang?: string): string {
 export const description =
   "Qwant videos search engine. Note: Qwant uses bot protection on its search APIs. 'curl-impersonate' (pre-installed in Degoog) or a browser transport is recommended on residential IPs."
 
+const GLOBAL_COOKIE_KEY = "__degoog_qwant_datadome_cookie"
 let cachedDataDome: string | null = null
+
+function getActiveDataDomeCookie(configuredCookie?: string): string {
+  const globalCookie = (globalThis as any)[GLOBAL_COOKIE_KEY]
+  if (typeof globalCookie === "string" && globalCookie.trim()) {
+    return globalCookie.trim()
+  }
+  if (cachedDataDome && cachedDataDome.trim()) {
+    return cachedDataDome.trim()
+  }
+  return configuredCookie?.trim() || ""
+}
+
+function updateDataDomeCookie(cookie: string | null) {
+  if (cookie && cookie.trim()) {
+    const clean = cookie.trim()
+    cachedDataDome = clean
+    ;(globalThis as any)[GLOBAL_COOKIE_KEY] = clean
+  } else {
+    cachedDataDome = null
+    delete (globalThis as any)[GLOBAL_COOKIE_KEY]
+  }
+}
+
+function extractDataDomeCookie(response: any): string | null {
+  if (typeof response?.headers?.getSetCookie === "function") {
+    const cookies: string[] = response.headers.getSetCookie() || []
+    for (const c of cookies) {
+      const m = c.match(/datadome=([^;]+)/)
+      if (m) return m[1].trim()
+    }
+  }
+  const rawCookie =
+    response?.headers?.get?.("set-cookie") ||
+    response?.headers?.get?.("x-set-cookie") ||
+    ""
+  const m = rawCookie.match(/datadome=([^;]+)/)
+  return m ? m[1].trim() : null
+}
 
 export const engine = {
   name: "Qwant Videos",
@@ -105,7 +144,11 @@ export const engine = {
       this.safeSearch = settings.safeSearch
     }
     if (typeof settings?.datadomeCookie === "string") {
-      this.datadomeCookie = settings.datadomeCookie.trim()
+      const val = settings.datadomeCookie.trim()
+      this.datadomeCookie = val
+      if (val) {
+        updateDataDomeCookie(val)
+      }
     }
   },
 
@@ -156,9 +199,9 @@ export const engine = {
 
       const url = `https://api.qwant.com/v3/search/videos?${params.toString()}`
 
-      const activeCookie =
-        (this?.datadomeCookie ?? engine.datadomeCookie)?.trim() ||
-        cachedDataDome
+      const activeCookie = getActiveDataDomeCookie(
+        (this?.datadomeCookie ?? engine.datadomeCookie)?.trim()
+      )
 
       const headers: Record<string, string> = {
         Accept: "application/json, text/plain, */*",
@@ -173,18 +216,18 @@ export const engine = {
 
       const response = await doFetch(url, { headers })
 
-      // Update cached datadome cookie if returned by server
-      const setCookie =
-        response.headers.get("set-cookie") ||
-        response.headers.get("x-set-cookie") ||
-        ""
-      const ddMatch = setCookie.match(/datadome=([^;]+)/)
-      if (ddMatch) {
-        cachedDataDome = ddMatch[1]
+      // Update cached datadome cookie if returned by server on successful response
+      if (response.ok || response.status < 400) {
+        const freshCookie = extractDataDomeCookie(response)
+        if (freshCookie && !freshCookie.startsWith("~") && freshCookie.length > 20) {
+          updateDataDomeCookie(freshCookie)
+        }
       }
 
       // Check if blocked by DataDome CAPTCHA/interstitial challenge
       if (response.status === 403) {
+        // Clear rolling cache so next call falls back to configured cookie or re-prompts
+        updateDataDomeCookie(null)
         let isDataDome = response.headers.get("x-datadome") === "protected"
         if (!isDataDome) {
           try {
