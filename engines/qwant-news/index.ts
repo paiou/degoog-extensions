@@ -57,28 +57,85 @@ export const description =
   "Qwant news search engine. Note: Qwant uses bot protection on its search APIs. 'curl-impersonate' (pre-installed in Degoog) or a browser transport is recommended on residential IPs."
 
 const GLOBAL_COOKIE_KEY = "__degoog_qwant_datadome_cookie"
+const GLOBAL_LAST_CONFIGURED_KEY = "__degoog_qwant_last_configured_cookie"
+const GLOBAL_UA_KEY = "__degoog_qwant_user_agent"
 let cachedDataDome: string | null = null
+let lastConfiguredCookie = ""
 
-function getActiveDataDomeCookie(configuredCookie?: string): string {
-  const globalCookie = (globalThis as any)[GLOBAL_COOKIE_KEY]
-  if (typeof globalCookie === "string" && globalCookie.trim()) {
-    return globalCookie.trim()
+const DEFAULT_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+
+function cleanDataDomeCookie(raw?: string): string {
+  if (!raw || typeof raw !== "string") return ""
+  let c = raw.trim()
+  if ((c.startsWith('"') && c.endsWith('"')) || (c.startsWith("'") && c.endsWith("'"))) {
+    c = c.slice(1, -1).trim()
   }
-  if (cachedDataDome && cachedDataDome.trim()) {
-    return cachedDataDome.trim()
+  if (c.toLowerCase().startsWith("cookie:")) {
+    c = c.slice(7).trim()
   }
-  return configuredCookie?.trim() || ""
+  if (c.includes("\t")) {
+    const parts = c.split("\t").map((p) => p.trim())
+    const ddIdx = parts.indexOf("datadome")
+    if (ddIdx !== -1 && parts[ddIdx + 1]) {
+      return parts[ddIdx + 1]
+    }
+  }
+  const m = c.match(/(?:^|;\s*)datadome=([^;]+)/i)
+  if (m) {
+    return m[1].trim()
+  }
+  if (c.startsWith("datadome=")) {
+    return c.slice(9).trim()
+  }
+  if (c.endsWith(";")) {
+    c = c.slice(0, -1).trim()
+  }
+  return c
 }
 
-function updateDataDomeCookie(cookie: string | null) {
+function maskCookie(cookie?: string): string {
+  if (!cookie) return "none"
+  if (cookie.length <= 12) return cookie
+  return `${cookie.slice(0, 6)}...${cookie.slice(-6)} (len: ${cookie.length})`
+}
+
+function updateDataDomeCookie(cookie: string | null, reason = "", engineName = "Qwant News") {
   if (cookie && cookie.trim()) {
-    const clean = cookie.trim()
+    const clean = cleanDataDomeCookie(cookie)
     cachedDataDome = clean
     ;(globalThis as any)[GLOBAL_COOKIE_KEY] = clean
+    console.log(`[${engineName}] DataDome cookie updated [${reason}]: ${maskCookie(clean)}`)
   } else {
     cachedDataDome = null
     delete (globalThis as any)[GLOBAL_COOKIE_KEY]
+    console.log(`[${engineName}] DataDome cookie cleared [${reason}]`)
   }
+}
+
+function getActiveDataDomeCookie(
+  configuredCookie?: string,
+  engineName = "Qwant News"
+): { cookie: string; source: string } {
+  const cleanConfigured = cleanDataDomeCookie(configuredCookie)
+  const lastConfigured =
+    (globalThis as any)[GLOBAL_LAST_CONFIGURED_KEY] || lastConfiguredCookie
+  if (cleanConfigured && cleanConfigured !== lastConfigured) {
+    lastConfiguredCookie = cleanConfigured
+    ;(globalThis as any)[GLOBAL_LAST_CONFIGURED_KEY] = cleanConfigured
+    updateDataDomeCookie(cleanConfigured, "new-settings-detected", engineName)
+  }
+  const globalCookie = (globalThis as any)[GLOBAL_COOKIE_KEY]
+  if (typeof globalCookie === "string" && globalCookie.trim()) {
+    return { cookie: globalCookie.trim(), source: "shared-cache" }
+  }
+  if (cachedDataDome && cachedDataDome.trim()) {
+    return { cookie: cachedDataDome.trim(), source: "local-cache" }
+  }
+  if (cleanConfigured) {
+    return { cookie: cleanConfigured, source: "settings" }
+  }
+  return { cookie: "", source: "none" }
 }
 
 function extractDataDomeCookie(response: any): string | null {
@@ -97,11 +154,31 @@ function extractDataDomeCookie(response: any): string | null {
   return m ? m[1].trim() : null
 }
 
+function getEffectiveUserAgent(context?: any, configuredUa?: string): string {
+  if (configuredUa && configuredUa.trim()) {
+    return configuredUa.trim()
+  }
+  const globalUa = (globalThis as any)[GLOBAL_UA_KEY]
+  if (typeof globalUa === "string" && globalUa.trim()) {
+    return globalUa.trim()
+  }
+  if (typeof context?.userAgent === "function") {
+    try {
+      const ua = context.userAgent()
+      if (typeof ua === "string" && ua.trim()) return ua.trim()
+    } catch {}
+  } else if (typeof context?.userAgent === "string" && context.userAgent.trim()) {
+    return context.userAgent.trim()
+  }
+  return DEFAULT_UA
+}
+
 export const engine = {
   name: "Qwant News",
   bangShortcut: "qwant-news",
   safeSearch: "moderate",
   datadomeCookie: "",
+  userAgent: "",
 
   settingsSchema: [
     {
@@ -122,6 +199,14 @@ export const engine = {
         "Optional: datadome cookie from your browser (inspect network requests on qwant.com to copy the datadome cookie value) to bypass challenges without a browser transport.",
     },
     {
+      key: "userAgent",
+      label: "Browser User-Agent",
+      type: "text",
+      advanced: true,
+      description:
+        "Optional: User-Agent from the browser where you obtained the DataDome cookie. If DataDome detects a User-Agent mismatch with your cookie, it will return HTTP 403.",
+    },
+    {
       key: "safeSearch",
       label: "Safe Search",
       type: "select",
@@ -132,14 +217,37 @@ export const engine = {
   ],
 
   configure(settings: Record<string, any>) {
+    const engineName = this?.name ?? engine.name
+    console.log(`[${engineName}] configure() called with settings keys:`, Object.keys(settings || {}))
     if (typeof settings?.safeSearch === "string") {
       this.safeSearch = settings.safeSearch
+      engine.safeSearch = settings.safeSearch
+    }
+    if (typeof settings?.userAgent === "string") {
+      const ua = settings.userAgent.trim()
+      this.userAgent = ua
+      engine.userAgent = ua
+      if (ua) {
+        ;(globalThis as any)[GLOBAL_UA_KEY] = ua
+        console.log(`[${engineName}] User-Agent configured: "${ua.slice(0, 50)}..."`)
+      }
     }
     if (typeof settings?.datadomeCookie === "string") {
-      const val = settings.datadomeCookie.trim()
+      const val = cleanDataDomeCookie(settings.datadomeCookie)
       this.datadomeCookie = val
+      engine.datadomeCookie = val
+      lastConfiguredCookie = val
+      ;(globalThis as any)[GLOBAL_LAST_CONFIGURED_KEY] = val
+      console.log(`[${engineName}] Settings updated: datadomeCookie set to ${maskCookie(val)}`)
       if (val) {
-        updateDataDomeCookie(val)
+        if (val.startsWith("~")) {
+          console.warn(
+            `[${engineName}] WARNING: Configured cookie starts with '~'. This is an unverified challenge cookie from DataDome. Please perform an actual search on qwant.com in your browser before copying the cookie.`
+          )
+        }
+        updateDataDomeCookie(val, "settings-save", engineName)
+      } else {
+        updateDataDomeCookie(null, "settings-cleared", engineName)
       }
     }
   },
@@ -153,7 +261,8 @@ export const engine = {
       fetch?: typeof fetch
       signProxyUrl?: (url: string) => string
       buildAcceptLanguage?: () => string
-      userAgent?: () => string
+      userAgent?: () => string | string
+      settings?: Record<string, any>
       dateFrom?: string
       dateTo?: string
       imageFilter?: Record<string, string>
@@ -169,6 +278,7 @@ export const engine = {
       ) => Error
     }
   ) {
+    const engineName = this?.name ?? engine.name
     try {
       const doFetch = context?.fetch ?? fetch
       const safeSearch =
@@ -195,16 +305,35 @@ export const engine = {
 
       const url = `https://api.qwant.com/v3/search/news?${params.toString()}`
 
-      const activeCookie = getActiveDataDomeCookie(
-        (this?.datadomeCookie ?? engine.datadomeCookie)?.trim()
+      const configuredCookie = cleanDataDomeCookie(
+        context?.settings?.datadomeCookie ??
+        (this?.datadomeCookie ?? engine.datadomeCookie)
       )
+
+      const { cookie: activeCookie, source: cookieSource } =
+        getActiveDataDomeCookie(configuredCookie, engineName)
+
+      const ua = getEffectiveUserAgent(
+        context,
+        context?.settings?.userAgent ?? (this?.userAgent ?? engine.userAgent)
+      )
+
+      console.log(
+        `[${engineName}] Search: "${query}" (page ${page || 1}). ` +
+        `Cookie: ${maskCookie(activeCookie)} [source: ${cookieSource}]. ` +
+        `UA: "${ua.slice(0, 45)}..."`
+      )
+
+      if (activeCookie.startsWith("~")) {
+        console.warn(
+          `[${engineName}] WARNING: Active cookie starts with '~', indicating an unverified challenge cookie. Request may fail with HTTP 403.`
+        )
+      }
 
       const headers: Record<string, string> = {
         Accept: "application/json, text/plain, */*",
         "Accept-Language": context?.buildAcceptLanguage?.() || "en-US,en;q=0.9",
-        "User-Agent":
-          context?.userAgent?.() ||
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "User-Agent": ua,
         Referer: "https://www.qwant.com/",
         Origin: "https://www.qwant.com",
         ...(activeCookie ? { Cookie: `datadome=${activeCookie}` } : {}),
@@ -212,18 +341,43 @@ export const engine = {
 
       const response = await doFetch(url, { headers })
 
+      const setCookieHeader =
+        response.headers.get("set-cookie") ||
+        response.headers.get("x-set-cookie") ||
+        ""
+
+      console.log(
+        `[${engineName}] Upstream response: status=${response.status} ${response.statusText || ""}. ` +
+        `x-datadome=${response.headers.get("x-datadome") || "none"}, ` +
+        `x-dd-b=${response.headers.get("x-dd-b") || "none"}, ` +
+        `set-cookie=${setCookieHeader ? "yes" : "no"}`
+      )
+
       // Update cached datadome cookie if returned by server on successful response
       if (response.ok || response.status < 400) {
         const freshCookie = extractDataDomeCookie(response)
-        if (freshCookie && !freshCookie.startsWith("~") && freshCookie.length > 20) {
-          updateDataDomeCookie(freshCookie)
+        if (freshCookie) {
+          if (freshCookie.startsWith("~")) {
+            console.log(
+              `[${engineName}] Ignored unverified challenge cookie in Set-Cookie: ${maskCookie(freshCookie)}`
+            )
+          } else if (freshCookie.length > 20) {
+            console.log(
+              `[${engineName}] Rolling renewal: Qwant issued fresh verified cookie ${maskCookie(freshCookie)}`
+            )
+            updateDataDomeCookie(freshCookie, "rolling-renewal", engineName)
+          }
         }
       }
 
       // Check if blocked by DataDome CAPTCHA/interstitial challenge
       if (response.status === 403) {
-        // Clear rolling cache so next call falls back to configured cookie or re-prompts
-        updateDataDomeCookie(null)
+        console.warn(
+          `[${engineName}] DataDome blocked request (HTTP 403). ` +
+          `Active cookie was: ${maskCookie(activeCookie)} [source: ${cookieSource}]. ` +
+          `Purging rolling cache.`
+        )
+        updateDataDomeCookie(null, "challenge-403", engineName)
         let isDataDome = response.headers.get("x-datadome") === "protected"
         if (!isDataDome) {
           try {
