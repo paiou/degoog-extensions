@@ -69,7 +69,10 @@ async function fetchCookieFromBrowser() {
       "--disable-dev-shm-usage",
       "--disable-gpu",
       "--disable-blink-features=AutomationControlled",
+      "--disable-infobars",
       "--window-size=1920,1080",
+      `--user-agent=${USER_AGENT}`,
+      "--lang=en-US,en",
     ],
   })
 
@@ -78,58 +81,305 @@ async function fetchCookieFromBrowser() {
     await page.setUserAgent(USER_AGENT)
     await page.setViewport({ width: 1920, height: 1080 })
 
-    // Hide navigator.webdriver
+    // Stealth evasion injections
     await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined })
+      // 1. Remove navigator.webdriver
+      try {
+        Object.defineProperty(navigator, "webdriver", {
+          get: () => undefined,
+          configurable: true,
+        })
+        delete navigator.__proto__.webdriver
+      } catch {}
+
+      // 2. Mock window.chrome with realistic runtime and app
+      try {
+        window.chrome = {
+          app: {
+            isInstalled: false,
+            InstallState: {
+              DISABLED: "disabled",
+              INSTALLED: "installed",
+              NOT_INSTALLED: "not_installed",
+            },
+            RunningState: {
+              CANNOT_RUN: "cannot_run",
+              READY_TO_RUN: "ready_to_run",
+              RUNNING: "running",
+            },
+          },
+          runtime: {
+            OnInstalledReason: {
+              CHROME_UPDATE: "chrome_update",
+              INSTALL: "install",
+              SHARED_MODULE_UPDATE: "shared_module_update",
+              UPDATE: "update",
+            },
+            OnRestartRequiredReason: {
+              APP_UPDATE: "app_update",
+              OS_UPDATE: "os_update",
+              PERIODIC: "periodic",
+            },
+            PlatformArch: {
+              ARM: "arm",
+              ARM64: "arm64",
+              MIPS: "mips",
+              MIPS64: "mips64",
+              X86_32: "x86-32",
+              X86_64: "x86-64",
+            },
+            PlatformNaclArch: {
+              ARM: "arm",
+              MIPS: "mips",
+              MIPS64: "mips64",
+              X86_32: "x86-32",
+              X86_64: "x86-64",
+            },
+            PlatformOs: {
+              ANDROID: "android",
+              CROS: "cros",
+              LINUX: "linux",
+              MAC: "mac",
+              OPENBSD: "openbsd",
+              WIN: "win",
+            },
+            RequestUpdateCheckStatus: {
+              NO_UPDATE: "no_update",
+              THROTTLED: "throttled",
+              UPDATE_AVAILABLE: "update_available",
+            },
+          },
+          loadTimes: function () {
+            return {
+              requestTime: performance.timeOrigin / 1000,
+              startLoadTime: performance.timeOrigin / 1000,
+              commitLoadTime: performance.timeOrigin / 1000 + 0.05,
+              finishDocumentLoadTime: performance.timeOrigin / 1000 + 0.1,
+              firstPaintTime: performance.timeOrigin / 1000 + 0.12,
+              finishLoadTime: performance.timeOrigin / 1000 + 0.2,
+              wasFetchedViaSpdy: true,
+              wasNpnNegotiated: true,
+              npnNegotiatedProtocol: "h2",
+              connectionInfo: "h2",
+            }
+          },
+          csi: function () {
+            return {
+              startE: performance.timeOrigin,
+              onloadT: performance.timeOrigin + 200,
+              pageT: 250,
+              tran: 15,
+            }
+          },
+        }
+      } catch {}
+
+      // 3. Mock navigator.plugins & mimeTypes
+      try {
+        const createPlugin = (name, description, filename, mimes) => {
+          const p = {
+            name,
+            description,
+            filename,
+            length: mimes.length,
+            item: (i) => mimes[i],
+            namedItem: (n) => mimes.find((m) => m.type === n) || null,
+            [Symbol.iterator]: function* () {
+              for (const m of mimes) yield m
+            },
+          }
+          mimes.forEach((m, idx) => {
+            p[idx] = m
+          })
+          return p
+        }
+        const pdfMime = {
+          type: "application/pdf",
+          suffixes: "pdf",
+          description: "Portable Document Format",
+          enabledPlugin: null,
+        }
+        const pdfPlugin = createPlugin(
+          "Chrome PDF Viewer",
+          "Portable Document Format",
+          "internal-pdf-viewer",
+          [pdfMime]
+        )
+        pdfMime.enabledPlugin = pdfPlugin
+
+        Object.defineProperty(navigator, "plugins", {
+          get: () => [pdfPlugin],
+          configurable: true,
+        })
+        Object.defineProperty(navigator, "mimeTypes", {
+          get: () => [pdfMime],
+          configurable: true,
+        })
+      } catch {}
+
+      // 4. Mock navigator.languages
+      try {
+        Object.defineProperty(navigator, "languages", {
+          get: () => ["en-US", "en"],
+          configurable: true,
+        })
+      } catch {}
+
+      // 5. Mock WebGL vendor & renderer (avoid SwiftShader / llvmpipe bot signals)
+      try {
+        const getParameter = WebGLRenderingContext.prototype.getParameter
+        WebGLRenderingContext.prototype.getParameter = function (parameter) {
+          if (parameter === 37445) return "Google Inc. (Intel)"
+          if (parameter === 37446)
+            return "ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 640, OpenGL 4.1)"
+          return getParameter.apply(this, arguments)
+        }
+        if (typeof WebGL2RenderingContext !== "undefined") {
+          const getParameter2 = WebGL2RenderingContext.prototype.getParameter
+          WebGL2RenderingContext.prototype.getParameter = function (parameter) {
+            if (parameter === 37445) return "Google Inc. (Intel)"
+            if (parameter === 37446)
+              return "ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 640, OpenGL 4.1)"
+            return getParameter2.apply(this, arguments)
+          }
+        }
+      } catch {}
+
+      // 6. Mock Notification permissions
+      try {
+        if (navigator.permissions && navigator.permissions.query) {
+          const origQuery = navigator.permissions.query
+          navigator.permissions.query = function (parameters) {
+            if (parameters && parameters.name === "notifications") {
+              return Promise.resolve({
+                state: Notification.permission || "default",
+                onchange: null,
+              })
+            }
+            return origQuery.apply(this, arguments)
+          }
+        }
+      } catch {}
+    })
+
+    // Listen for Qwant API responses
+    let observedApiStatus = null
+    let searchApiOk = false
+
+    page.on("response", (res) => {
+      const u = res.url()
+      if (
+        u.includes("api.qwant.com/v3/search") ||
+        u.includes("api.qwant.com/api/search")
+      ) {
+        observedApiStatus = res.status()
+        if (res.status() === 200) {
+          searchApiOk = true
+          console.log(
+            `[QwantSync] Observed upstream API HTTP 200: ${u.slice(0, 65)}...`
+          )
+        } else if (res.status() === 403) {
+          console.warn(
+            `[QwantSync] Observed upstream API HTTP 403: ${u.slice(0, 65)}...`
+          )
+        }
+      }
     })
 
     console.log(`[QwantSync] Navigating to ${TARGET_URL}...`)
-    await page.goto(TARGET_URL, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    })
+    await page
+      .goto(TARGET_URL, {
+        waitUntil: "networkidle2",
+        timeout: 30000,
+      })
+      .catch(() => {
+        // networkidle2 might timeout if long-polling or analytics keep running; proceed to check
+      })
 
-    console.log(`[QwantSync] Waiting for DataDome script and cookie...`)
-
-    let datadomeCookie = null
-    const startTime = Date.now()
-
-    while (Date.now() - startTime < 20000) {
-      const cookies = await page.cookies("https://www.qwant.com", "https://api.qwant.com")
-      const found = cookies.find((c) => c.name.toLowerCase() === "datadome")
-      if (found && found.value && !found.value.startsWith("~") && found.value.length > 20) {
-        datadomeCookie = found
-        break
-      }
-      // Small delay between checks
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+    // Wait up to 10s for API response if not already seen
+    const waitStart = Date.now()
+    while (Date.now() - waitStart < 10000 && !searchApiOk) {
+      if (observedApiStatus === 403) break
+      await new Promise((r) => setTimeout(r, 1000))
     }
 
+    // Active in-browser verification test
+    console.log(
+      `[QwantSync] Running in-browser test API call to verify DataDome authorization...`
+    )
+    const testResult = await page
+      .evaluate(async () => {
+        try {
+          const res = await fetch(
+            "https://api.qwant.com/v3/search/web?q=qwant&count=1&locale=en_US&offset=0&device=desktop&safesearch=1&tgp=1&displayed=true&llm=true",
+            {
+              headers: {
+                Accept: "application/json, text/plain, */*",
+                Referer: "https://www.qwant.com/",
+                Origin: "https://www.qwant.com",
+              },
+            }
+          )
+          const text = await res.text().catch(() => "")
+          return {
+            status: res.status,
+            ok: res.ok,
+            isJson: text.trim().startsWith("{"),
+          }
+        } catch (err) {
+          return { status: 0, ok: false, error: String(err) }
+        }
+      })
+      .catch((err) => ({ status: 0, ok: false, error: err.message }))
+
+    console.log(
+      `[QwantSync] In-browser API check: status=${testResult.status}, ok=${testResult.ok}, isJson=${testResult.isJson}`
+    )
+
+    if (testResult.status !== 200 || !testResult.isJson) {
+      latestState.lastError = `DataDome challenge active (HTTP ${testResult.status})`
+      throw new Error(
+        `DataDome blocked browser (HTTP ${testResult.status}). Refusing to capture unverified challenge cookie.`
+      )
+    }
+
+    // Only when the test call returned 200 JSON do we capture the cookie!
+    const cookies = await page.cookies(
+      "https://www.qwant.com",
+      "https://api.qwant.com"
+    )
+    let datadomeCookie = cookies.find((c) => c.name.toLowerCase() === "datadome")
+
     if (!datadomeCookie) {
-      // Check document.cookie as fallback
       const docCookie = await page.evaluate(() => document.cookie).catch(() => "")
       const m = docCookie.match(/datadome=([^;]+)/)
-      if (m && m[1] && !m[1].startsWith("~") && m[1].length > 20) {
+      if (m && m[1]) {
         datadomeCookie = { value: m[1].trim(), expires: Date.now() / 1000 + 3600 }
       }
     }
 
-    if (!datadomeCookie) {
-      throw new Error("Timed out waiting for verified DataDome cookie from qwant.com")
+    if (!datadomeCookie || !datadomeCookie.value) {
+      throw new Error("No DataDome cookie found in verified browser session")
     }
 
-    const actualUa = await page.evaluate(() => navigator.userAgent).catch(() => USER_AGENT)
+    const actualUa = await page
+      .evaluate(() => navigator.userAgent)
+      .catch(() => USER_AGENT)
 
     latestState = {
       datadome: datadomeCookie.value,
       userAgent: actualUa || USER_AGENT,
       updatedAt: Date.now(),
-      expiresAt: datadomeCookie.expires ? datadomeCookie.expires * 1000 : Date.now() + 3600 * 1000,
+      expiresAt: datadomeCookie.expires
+        ? datadomeCookie.expires * 1000
+        : Date.now() + 3600 * 1000,
       lastError: null,
     }
 
     console.log(
-      `[QwantSync] Successfully captured verified DataDome cookie: ${maskCookie(latestState.datadome)}`
+      `[QwantSync] Successfully captured verified DataDome cookie: ${maskCookie(
+        latestState.datadome
+      )}`
     )
 
     if (COOKIE_FILE) {
@@ -237,6 +487,7 @@ const server = http.createServer(async (req, res) => {
       res.end(
         JSON.stringify({
           success: true,
+          hasCookie: true,
           cookie: refreshed.datadome,
           datadome: refreshed.datadome,
           userAgent: refreshed.userAgent,
@@ -244,8 +495,16 @@ const server = http.createServer(async (req, res) => {
         })
       )
     } catch (err) {
-      res.writeHead(500)
-      res.end(JSON.stringify({ success: false, error: err.message }))
+      res.writeHead(200)
+      res.end(
+        JSON.stringify({
+          success: false,
+          hasCookie: false,
+          cookie: "",
+          datadome: "",
+          error: err.message,
+        })
+      )
     }
     return
   }
@@ -269,10 +528,11 @@ const server = http.createServer(async (req, res) => {
       ? Math.round((Date.now() - latestState.updatedAt) / 1000)
       : null
 
-    res.writeHead(latestState.datadome ? 200 : 503)
+    res.writeHead(latestState.datadome ? 200 : 200)
     res.end(
       JSON.stringify({
         success: Boolean(latestState.datadome),
+        hasCookie: Boolean(latestState.datadome),
         cookie: latestState.datadome,
         datadome: latestState.datadome,
         userAgent: latestState.userAgent,

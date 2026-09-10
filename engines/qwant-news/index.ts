@@ -1,3 +1,4 @@
+declare const process: any
 export const type = "news"
 
 const SAFE_SEARCH_MAP: Record<string, string> = {
@@ -118,8 +119,12 @@ function updateDataDomeCookie(cookie: string | null, reason = "", engineName = "
 
 function getActiveDataDomeCookie(
   configuredCookie?: string,
-  engineName = "Qwant News"
+  engineName = "Qwant News",
+  forceNoCookie = false
 ): { cookie: string; source: string } {
+  if (forceNoCookie) {
+    return { cookie: "", source: "forced-clean-retry" }
+  }
   const cleanConfigured = cleanDataDomeCookie(configuredCookie)
   const lastConfigured =
     (globalThis as any)[GLOBAL_LAST_CONFIGURED_KEY] || lastConfiguredCookie
@@ -276,6 +281,12 @@ async function syncWithSidecar(
       })
       if (res.ok) {
         const data: any = await res.json()
+        if (data.hasCookie === false || (!data.cookie && !data.datadome)) {
+          console.log(
+            `[${engineName}] Sidecar reports no verified cookie available. Proceeding without cookie.`
+          )
+          return null
+        }
         const cookie = cleanDataDomeCookie(data.cookie || data.datadome)
         const ua = data.userAgent?.trim() || ""
         if (cookie) {
@@ -303,7 +314,8 @@ async function syncWithSidecar(
   // 2. Try file path
   if (effectiveFile) {
     try {
-      const fs = await import("fs/promises")
+      const fsMod = "fs/promises"
+      const fs: any = await import(fsMod)
       const content = await fs.readFile(effectiveFile, "utf-8")
       const data = JSON.parse(content)
       const cookie = cleanDataDomeCookie(data.cookie || data.datadome)
@@ -445,11 +457,17 @@ export const engine = {
       key: "outgoingTransport",
       label: "Outgoing HTTP client transport",
       type: "select",
-      options: ["curl-impersonate", "fetch", "curl", "curl-fallback"],
-      default: "curl-impersonate",
+      options: [
+        "curl-impersonate-chrome",
+        "curl-impersonate",
+        "fetch",
+        "curl",
+        "curl-fallback",
+      ],
+      default: "curl-impersonate-chrome",
       advanced: true,
       description:
-        "Select an outgoing transport. 'curl-impersonate' (pre-installed in Degoog) is recommended on residential IPs to match browser TLS fingerprints and bypass DataDome.",
+        "Select an outgoing transport. 'curl-impersonate-chrome' (recommended) matches Chromium TLS fingerprints with the cookie sidecar to bypass DataDome.",
     },
     {
       key: "cookieServerUrl",
@@ -563,8 +581,11 @@ export const engine = {
         message: string,
         opts?: { httpStatus?: number; engine?: string }
       ) => Error
+      _qwantRetry?: boolean
+      _qwantForceNoCookie?: boolean
+      [key: string]: any
     }
-  ) {
+  ): Promise<any[]> {
     const engineName = this?.name ?? engine.name
     try {
       const doFetch = context?.fetch ?? fetch
@@ -592,10 +613,11 @@ export const engine = {
 
       const url = `https://api.qwant.com/v3/search/news?${params.toString()}`
 
+      const forceNoCookie = Boolean(context?._qwantForceNoCookie)
       const sidecarUrl = getEffectiveSidecarUrl(context, this)
       const sidecarFile = getEffectiveSidecarFile(context, this)
 
-      if (sidecarUrl || sidecarFile) {
+      if (!forceNoCookie && (sidecarUrl || sidecarFile)) {
         await syncWithSidecar(sidecarUrl, sidecarFile, false, engineName)
       }
 
@@ -605,7 +627,7 @@ export const engine = {
       )
 
       const { cookie: activeCookie, source: cookieSource } =
-        getActiveDataDomeCookie(configuredCookie, engineName)
+        getActiveDataDomeCookie(configuredCookie, engineName, forceNoCookie)
 
       const ua = getEffectiveUserAgent(
         context,
@@ -618,9 +640,9 @@ export const engine = {
         `UA: "${ua.slice(0, 45)}..."`
       )
 
-      if (activeCookie.startsWith("~")) {
+      if (activeCookie && (activeCookie.startsWith("~") || activeCookie.endsWith("~"))) {
         console.warn(
-          `[${engineName}] WARNING: Active cookie starts with '~', indicating an unverified challenge cookie. Request may fail with HTTP 403.`
+          `[${engineName}] WARNING: Active cookie contains '~' boundary marker, indicating an unverified challenge cookie. Request may fail with HTTP 403.`
         )
       }
 
@@ -630,30 +652,34 @@ export const engine = {
         "User-Agent": ua,
         Referer: "https://www.qwant.com/",
         Origin: "https://www.qwant.com",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
         ...(activeCookie ? { Cookie: `datadome=${activeCookie}` } : {}),
       }
 
       const response = await doFetch(url, { headers })
 
       const freshCookie = extractDataDomeCookie(response)
+      const headersAny = response.headers as any
       const rawSetCookie =
         (typeof response.headers.getSetCookie === "function" && response.headers.getSetCookie().length > 0) ||
         response.headers.get?.("set-cookie") ||
         response.headers.get?.("x-set-cookie") ||
-        response.headers?.["set-cookie"] ||
-        response.headers?.["x-set-cookie"]
+        headersAny?.["set-cookie"] ||
+        headersAny?.["x-set-cookie"]
 
       console.log(
         `[${engineName}] Upstream response: status=${response.status} ${response.statusText || ""}. ` +
-        `x-datadome=${response.headers.get?.("x-datadome") || response.headers?.["x-datadome"] || "none"}, ` +
-        `x-dd-b=${response.headers.get?.("x-dd-b") || response.headers?.["x-dd-b"] || "none"}, ` +
+        `x-datadome=${response.headers.get?.("x-datadome") || headersAny?.["x-datadome"] || "none"}, ` +
+        `x-dd-b=${response.headers.get?.("x-dd-b") || headersAny?.["x-dd-b"] || "none"}, ` +
         `set-cookie=${rawSetCookie ? (freshCookie ? `yes [datadome: ${maskCookie(freshCookie)}]` : "yes [no datadome]") : "none"}`
       )
 
       // Update cached datadome cookie if returned by server on successful response
       if (response.ok || response.status < 400) {
         if (freshCookie) {
-          if (freshCookie.startsWith("~")) {
+          if (freshCookie.startsWith("~") || freshCookie.endsWith("~")) {
             console.log(
               `[${engineName}] Ignored unverified challenge cookie in Set-Cookie: ${maskCookie(freshCookie)}`
             )
@@ -670,15 +696,34 @@ export const engine = {
       if (response.status === 403) {
         console.warn(
           `[${engineName}] DataDome blocked request (HTTP 403). ` +
-          `Active cookie was: ${maskCookie(activeCookie)} [source: ${cookieSource}]. ` +
-          `Purging rolling cache.`
+          `Active cookie was: ${maskCookie(activeCookie)} [source: ${cookieSource}].`
         )
         updateDataDomeCookie(null, "challenge-403", engineName)
+        delete (globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY]
+        delete (globalThis as any)[GLOBAL_SIDECAR_FETCH_TIME_KEY]
 
-        // If sidecar is available and this isn't already a retry, request fresh cookie and retry once
-        if ((sidecarUrl || sidecarFile) && !context?._qwantRetry) {
+        // Branch 1: If request failed WITH a cookie, retry immediately WITHOUT a cookie!
+        // As verified, clean residential connections often succeed directly with no cookie,
+        // whereas a tainted/challenged/mismatched cookie triggers guaranteed 403 blocks.
+        if (activeCookie && !context?._qwantRetry) {
           console.log(
-            `[${engineName}] Requesting fresh cookie from sidecar after HTTP 403...`
+            `[${engineName}] Search failed with cookie. Retrying immediately WITHOUT cookie on clean connection...`
+          )
+          if (sidecarUrl) {
+            triggerSidecarRefresh(sidecarUrl, engineName)
+          }
+          return await (this?.executeSearch ?? engine.executeSearch)(
+            query,
+            page,
+            timeFilter,
+            { ...context, _qwantRetry: true, _qwantForceNoCookie: true }
+          )
+        }
+
+        // Branch 2: If request was WITHOUT a cookie and failed, attempt to obtain a verified cookie from sidecar
+        if (!activeCookie && (sidecarUrl || sidecarFile) && !context?._qwantRetry) {
+          console.log(
+            `[${engineName}] Search without cookie returned 403. Requesting verified browser cookie from sidecar...`
           )
           const refreshed = await syncWithSidecar(
             sidecarUrl,
@@ -688,7 +733,7 @@ export const engine = {
           )
           if (refreshed?.cookie) {
             console.log(
-              `[${engineName}] Retrying search with refreshed sidecar cookie...`
+              `[${engineName}] Retrying search with verified sidecar cookie...`
             )
             return await (this?.executeSearch ?? engine.executeSearch)(
               query,

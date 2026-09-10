@@ -43,7 +43,9 @@ Settings can be specified in Degoog's engine configuration UI, or via environmen
 
 | Setting | Environment Variable | Default | Description |
 |---|---|---|---|
+| `outgoingTransport` | - | `curl-impersonate-chrome` | Transport client (`curl-impersonate-chrome` recommended to match Chromium TLS fingerprints with sidecar) |
 | `cookieServerUrl` | `QWANT_COOKIE_SERVER_URL` | `""` | URL to the sidecar cookie endpoint (e.g., `http://qwant-sidecar:3005/cookie`) |
 | `cookieFilePath` | `QWANT_COOKIE_FILE` | `""` | Optional path to a shared JSON file written by the sidecar |
-| `cookie` | `QWANT_COOKIE` | `""` | Static DataDome cookie value fallback |
-| `customUserAgent` | `QWANT_USER_AGENT` | Chrome 133 Desktop | User-Agent matching the DataDome cookie |
+| `datadomeCookie` | `QWANT_COOKIE` | `""` | Static DataDome cookie value fallback |
+| `userAgent` | `QWANT_USER_AGENT` | Chrome 133 Desktop | User-Agent matching the DataDome cookie |
+

@@ -5,9 +5,10 @@ A lightweight companion service for [Degoog](https://github.com/degoog-org/degoo
 ## Why this approach?
 
 1. **Zero latency impact on searches:** Degoog continues using ultra-fast `curl-impersonate` HTTP queries for each search. No browser is in the critical request path.
-2. **Minimal resource usage:** The headless browser only launches for ~5 seconds every 25 minutes to refresh the cookie, and then immediately exits to release all RAM (0% idle memory).
-3. **High reliability:** Because DataDome executes in a genuine Chromium environment on the same host/network, the resulting cookie and TLS/User-Agent parameters pass upstream validation.
-4. **Automatic reactive retry:** If Qwant responds with HTTP 403, Degoog immediately asks the sidecar for a fresh cookie on-demand and retries the search.
+2. **TLS and Fingerprint Alignment:** Degoog's `curl-impersonate-chrome` transport matches the Chromium TLS handshake and Chrome User-Agent used by the sidecar, preventing DataDome token-hijacking rejections (HTTP 403) caused by TLS/browser mismatches.
+3. **Active In-Browser Verification:** The sidecar uses anti-bot stealth evasions and actively verifies that Qwant's search API returns HTTP 200 before saving or serving a cookie. It never serves unverified or 403 challenge cookies.
+4. **Minimal resource usage:** The headless browser only launches for ~5 seconds every 25 minutes to refresh the cookie, and then immediately exits to release all RAM (0% idle memory).
+5. **Two-way resilient recovery:** If a request with a cookie ever receives an HTTP 403, Degoog instantly purges the cookie and retries cleanly without a cookie, while asynchronously asking the sidecar to refresh for future searches.
 
 ---
 

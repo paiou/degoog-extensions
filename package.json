@@ -9,27 +9,34 @@
       "path": "engines/qwant",
       "name": "Qwant",
       "description": "Search using Qwant",
-      "version": "1.2.1"
+      "version": "1.2.2"
     },
     {
       "path": "engines/qwant-images",
       "name": "Qwant Images",
       "description": "Search images using Qwant",
-      "version": "1.1.1"
+      "version": "1.1.2"
     },
     {
       "path": "engines/qwant-news",
       "name": "Qwant News",
       "description": "Search news using Qwant",
-      "version": "1.1.1"
+      "version": "1.1.2"
     },
     {
       "path": "engines/qwant-videos",
       "name": "Qwant Videos",
       "description": "Search videos using Qwant",
-      "version": "1.1.1"
+      "version": "1.1.2"
     }
   ],
-  "transports": [],
+  "transports": [
+    {
+      "path": "transports/curl-impersonate-chrome",
+      "name": "curl-impersonate-chrome",
+      "description": "Curl Impersonate Chrome transport matching Chromium TLS fingerprints",
+      "version": "1.0.0"
+    }
+  ],
   "autocomplete": []
 }
