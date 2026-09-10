@@ -73,31 +73,64 @@ const CHROME_BINARIES = [
   "curl-impersonate-chrome",
 ] as const
 
-let _cachedChromeBinary: string | null = null
+const FIREFOX_BINARIES = [
+  "curl_firefox135",
+  "curl_firefox133",
+  "curl_firefox128",
+  "curl_firefox120",
+  "curl_firefox117",
+  "curl_firefox109",
+  "curl-impersonate-firefox",
+  "curl-impersonate",
+] as const
 
-function getChromeBinary(): string | null {
-  if (_cachedChromeBinary) return _cachedChromeBinary
-  for (const bin of CHROME_BINARIES) {
-    try {
-      if (typeof Bun !== "undefined" && Bun.spawnSync) {
-        const res = Bun.spawnSync([bin, "--version"])
-        if (res.exitCode === 0) {
-          _cachedChromeBinary = bin
-          return bin
-        }
-      } else if (typeof process !== "undefined") {
-        const cpMod = "child_process"
-        const cp: any = (process as any).getBuiltinModule?.(cpMod)
-        if (cp?.spawnSync) {
-          const res = cp.spawnSync(bin, ["--version"])
-          if (res.status === 0) {
-            _cachedChromeBinary = bin
-            return bin
-          }
-        }
+let _cachedImpersonateBinary: { binary: string; family: "chrome" | "firefox" } | null = null
+
+function checkBinaryAvailable(bin: string): boolean {
+  try {
+    if (typeof Bun !== "undefined" && Bun.spawnSync) {
+      const res = Bun.spawnSync([bin, "--version"])
+      return res.exitCode === 0
+    } else if (typeof process !== "undefined") {
+      const cpMod = "child_process"
+      const cp: any = (process as any).getBuiltinModule?.(cpMod)
+      if (cp?.spawnSync) {
+        const res = cp.spawnSync(bin, ["--version"])
+        return res.status === 0
       }
-    } catch {}
+    }
+  } catch {}
+  return false
+}
+
+function getImpersonateBinary(
+  preferredFamily: "chrome" | "firefox" = "chrome"
+): { binary: string; family: "chrome" | "firefox" } | null {
+  if (
+    _cachedImpersonateBinary &&
+    _cachedImpersonateBinary.family === preferredFamily
+  ) {
+    return _cachedImpersonateBinary
   }
+
+  const primaryList = preferredFamily === "firefox" ? FIREFOX_BINARIES : CHROME_BINARIES
+  const primaryFamily = preferredFamily === "firefox" ? "firefox" : "chrome"
+  for (const bin of primaryList) {
+    if (checkBinaryAvailable(bin)) {
+      _cachedImpersonateBinary = { binary: bin, family: primaryFamily }
+      return _cachedImpersonateBinary
+    }
+  }
+
+  const secondaryList = preferredFamily === "firefox" ? CHROME_BINARIES : FIREFOX_BINARIES
+  const secondaryFamily = preferredFamily === "firefox" ? "chrome" : "firefox"
+  for (const bin of secondaryList) {
+    if (checkBinaryAvailable(bin)) {
+      _cachedImpersonateBinary = { binary: bin, family: secondaryFamily }
+      return _cachedImpersonateBinary
+    }
+  }
+
   return null
 }
 
@@ -127,7 +160,7 @@ function parseCurlResponseText(raw: string): Response {
   return new Response(bodyText, { status, headers })
 }
 
-async function fetchWithDirectChrome(
+async function fetchWithDirectImpersonate(
   binary: string,
   url: string,
   headers: Record<string, string>,
@@ -557,7 +590,7 @@ export const engine = {
   name: "Qwant",
   bangShortcut: "qwant",
   safeSearch: "moderate",
-  outgoingTransport: "curl-impersonate-chrome",
+  outgoingTransport: "auto",
   datadomeCookie: "",
   userAgent: "",
   cookieServerUrl: "",
@@ -569,16 +602,18 @@ export const engine = {
       label: "Outgoing HTTP client transport",
       type: "select",
       options: [
+        "auto",
         "curl-impersonate-chrome",
+        "curl-impersonate-firefox",
         "curl-impersonate",
         "fetch",
         "curl",
         "curl-fallback",
       ],
-      default: "curl-impersonate-chrome",
+      default: "auto",
       advanced: true,
       description:
-        "Select an outgoing transport. 'curl-impersonate-chrome' (recommended) matches Chromium TLS fingerprints with the cookie sidecar to bypass DataDome.",
+        "Select an outgoing transport. 'auto' (recommended) matches curl-impersonate-chrome or curl-impersonate-firefox based on your active User-Agent and cookie to match TLS fingerprints and bypass DataDome.",
     },
     {
       key: "cookieServerUrl",
@@ -767,6 +802,22 @@ export const engine = {
         )
       }
 
+      const isFirefoxUa = ua.toLowerCase().includes("firefox")
+      const outgoingTransportSetting =
+        context?.settings?.outgoingTransport ??
+        (this?.outgoingTransport ?? engine.outgoingTransport)
+
+      const targetFamily: "chrome" | "firefox" =
+        outgoingTransportSetting === "curl-impersonate-firefox"
+          ? "firefox"
+          : outgoingTransportSetting === "curl-impersonate-chrome"
+          ? "chrome"
+          : isFirefoxUa
+          ? "firefox"
+          : "chrome"
+
+      const impersonateTarget = getImpersonateBinary(targetFamily)
+
       const headers: Record<string, string> = {
         Accept: "application/json, text/plain, */*",
         "Accept-Language": context?.buildAcceptLanguage?.() || "en-US,en;q=0.9",
@@ -779,29 +830,40 @@ export const engine = {
         ...(activeCookie ? { Cookie: `datadome=${activeCookie}` } : {}),
       }
 
-      const outgoingTransportSetting =
-        context?.settings?.outgoingTransport ??
-        (this?.outgoingTransport ?? engine.outgoingTransport)
+      // Add Chromium Client Hints when targeting Chrome browser family
+      if (targetFamily === "chrome") {
+        headers["sec-ch-ua"] = '"Chromium";v="133", "Not(A:Brand";v="99"'
+        headers["sec-ch-ua-mobile"] = "?0"
+        const platform = ua.includes("Windows")
+          ? '"Windows"'
+          : ua.includes("Mac")
+          ? '"macOS"'
+          : '"Linux"'
+        headers["sec-ch-ua-platform"] = platform
+      }
 
-      const chromeBin = getChromeBinary()
-      const useDirectChrome =
-        chromeBin !== null &&
+      const useDirectImpersonate =
+        impersonateTarget !== null &&
         (!outgoingTransportSetting ||
-          outgoingTransportSetting === "curl-impersonate-chrome")
+          outgoingTransportSetting === "auto" ||
+          outgoingTransportSetting === "curl-impersonate" ||
+          outgoingTransportSetting.startsWith("curl-impersonate-"))
 
       let response: Response
-      if (useDirectChrome && chromeBin) {
-        console.log(`[${engineName}] Fetching via direct ${chromeBin} transport`)
+      if (useDirectImpersonate && impersonateTarget) {
+        console.log(
+          `[${engineName}] Fetching via direct ${impersonateTarget.binary} (${impersonateTarget.family}) transport`
+        )
         try {
-          response = await fetchWithDirectChrome(
-            chromeBin,
+          response = await fetchWithDirectImpersonate(
+            impersonateTarget.binary,
             url,
             headers,
             context?.proxyUrl
           )
         } catch (err: any) {
           console.warn(
-            `[${engineName}] Direct ${chromeBin} failed (${err?.message || err}), falling back to context fetch`
+            `[${engineName}] Direct ${impersonateTarget.binary} failed (${err?.message || err}), falling back to context fetch`
           )
           const doFetch = context?.fetch ?? fetch
           response = await doFetch(url, { headers })

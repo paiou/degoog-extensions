@@ -51,6 +51,28 @@ let latestState = {
 let isRefreshing = false
 let refreshPromise = null
 
+function cleanDataDomeCookie(raw) {
+  if (!raw || typeof raw !== "string") return ""
+  let c = raw.trim()
+  if ((c.startsWith('"') && c.endsWith('"')) || (c.startsWith("'") && c.endsWith("'"))) {
+    c = c.slice(1, -1).trim()
+  }
+  if (c.toLowerCase().startsWith("cookie:")) {
+    c = c.slice(7).trim()
+  }
+  const m = c.match(/(?:^|;\s*)datadome=([^;]+)/i)
+  if (m) {
+    return m[1].trim()
+  }
+  if (c.startsWith("datadome=")) {
+    return c.slice(9).trim()
+  }
+  if (c.endsWith(";")) {
+    c = c.slice(0, -1).trim()
+  }
+  return c
+}
+
 function maskCookie(cookie) {
   if (!cookie) return "none"
   if (cookie.length <= 12) return cookie
@@ -69,10 +91,16 @@ async function fetchCookieFromBrowser() {
     await fs.mkdir(USER_DATA_DIR, { recursive: true })
   } catch {}
 
-  console.log(`[QwantSync] Launching stealth headless browser using ${executablePath}...`)
+  const isHeadful =
+    Boolean(process.env.DISPLAY) &&
+    !["true", "new", "1"].includes((process.env.HEADLESS || "").toLowerCase())
+
+  console.log(
+    `[QwantSync] Launching browser (headful: ${isHeadful}, display: ${process.env.DISPLAY || "none"}) using ${executablePath}...`
+  )
   const browser = await puppeteer.launch({
     executablePath,
-    headless: "new",
+    headless: isHeadful ? false : "new",
     userDataDir: USER_DATA_DIR,
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
@@ -82,7 +110,10 @@ async function fetchCookieFromBrowser() {
       "--disable-blink-features=AutomationControlled",
       "--disable-infobars",
       "--window-size=1920,1080",
+      "--start-maximized",
       "--lang=en-US,en",
+      "--enable-webgl",
+      "--ignore-gpu-blocklist",
     ],
   })
 
@@ -180,6 +211,35 @@ async function fetchCookieFromBrowser() {
     const isVerified = (testResult.status === 200 && testResult.isJson) || searchApiOk
     if (!isVerified) {
       latestState.lastError = `DataDome challenge active (HTTP ${testResult.status || observedApiStatus})`
+
+      // Capture diagnostic information for user inspection
+      try {
+        const pageTitle = await page.title().catch(() => "")
+        console.warn(`[QwantSync] Verification failed. Current page title: "${pageTitle}"`)
+
+        // Check for DataDome captcha iframe
+        const captchaFrame = await page.$(
+          "iframe[src*='captcha-delivery.com'], #datadome-captcha, iframe[title*='verification'], iframe[title*='captcha']"
+        ).catch(() => null)
+        if (captchaFrame) {
+          const src = await page.evaluate((el) => el.getAttribute("src"), captchaFrame).catch(() => "")
+          console.warn(`[QwantSync] DataDome CAPTCHA iframe detected: ${src}`)
+        }
+
+        // Save diagnostic snapshot to /data
+        const snapDir = path.dirname(USER_DATA_DIR)
+        const screenshotPath = path.join(snapDir, "datadome-challenge.png")
+        const htmlPath = path.join(snapDir, "datadome-challenge.html")
+        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {})
+        const html = await page.content().catch(() => "")
+        if (html) {
+          await fs.writeFile(htmlPath, html, "utf-8").catch(() => {})
+        }
+        console.log(`[QwantSync] Diagnostic screenshot saved to ${screenshotPath}`)
+      } catch (diagErr) {
+        console.warn(`[QwantSync] Failed to capture diagnostic snapshot:`, diagErr.message)
+      }
+
       throw new Error(
         `DataDome blocked browser (HTTP ${testResult.status || observedApiStatus}). Refusing to capture unverified challenge cookie.`
       )
@@ -325,6 +385,59 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  if ((url.pathname === "/cookie" || url.pathname === "/") && req.method === "POST") {
+    let bodyText = ""
+    for await (const chunk of req) {
+      bodyText += chunk
+    }
+    try {
+      let body = {}
+      try {
+        body = JSON.parse(bodyText)
+      } catch {
+        body = { cookie: bodyText }
+      }
+      const rawCookie = body.cookie || body.datadome || bodyText
+      const cookieVal = cleanDataDomeCookie(rawCookie)
+      if (!cookieVal) {
+        res.writeHead(400)
+        res.end(JSON.stringify({ success: false, error: "No valid DataDome cookie provided in body" }))
+        return
+      }
+      const ua = (body.userAgent || body.ua || "").trim() || latestState.userAgent || USER_AGENT
+      latestState = {
+        datadome: cookieVal,
+        userAgent: ua,
+        updatedAt: Date.now(),
+        expiresAt: Date.now() + 3600 * 1000,
+        lastError: null,
+      }
+      console.log(`[QwantSync] Verified cookie manually injected via POST /cookie: ${maskCookie(cookieVal)}`)
+      if (COOKIE_FILE) {
+        await fs.writeFile(
+          COOKIE_FILE,
+          JSON.stringify(latestState, null, 2),
+          "utf-8"
+        ).catch(() => {})
+      }
+      res.writeHead(200)
+      res.end(
+        JSON.stringify({
+          success: true,
+          hasCookie: true,
+          cookie: latestState.datadome,
+          datadome: latestState.datadome,
+          userAgent: latestState.userAgent,
+          updatedAt: latestState.updatedAt,
+        })
+      )
+    } catch (err) {
+      res.writeHead(500)
+      res.end(JSON.stringify({ success: false, error: err.message }))
+    }
+    return
+  }
+
   if (url.pathname === "/raw") {
     res.setHeader("Content-Type", "text/plain")
     res.writeHead(200)
@@ -365,15 +478,47 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: "Not found" }))
 })
 
-server.listen(PORT, "0.0.0.0", () => {
+async function loadPersistedCookie() {
+  const candidates = [
+    COOKIE_FILE,
+    "/data/cookie.json",
+    path.join(path.dirname(USER_DATA_DIR), "cookie.json"),
+  ].filter(Boolean)
+
+  for (const p of candidates) {
+    try {
+      const raw = await fs.readFile(p, "utf-8")
+      const parsed = JSON.parse(raw)
+      const c = cleanDataDomeCookie(parsed.datadome || parsed.cookie)
+      if (c) {
+        latestState = {
+          datadome: c,
+          userAgent: parsed.userAgent || USER_AGENT,
+          updatedAt: parsed.updatedAt || Date.now(),
+          expiresAt: parsed.expiresAt || Date.now() + 3600 * 1000,
+          lastError: null,
+        }
+        console.log(`[QwantSync] Loaded existing cookie from ${p}: ${maskCookie(c)}`)
+        return true
+      }
+    } catch {}
+  }
+  return false
+}
+
+server.listen(PORT, "0.0.0.0", async () => {
   console.log(`[QwantSync] Sidecar HTTP server listening on http://0.0.0.0:${PORT}`)
   console.log(`[QwantSync] Auto-refresh interval: ${REFRESH_INTERVAL_MINUTES} minutes`)
   if (COOKIE_FILE) {
     console.log(`[QwantSync] Output cookie file: ${COOKIE_FILE}`)
   }
 
-  // Initial fetch on startup in background
-  refreshCookie().catch(() => {})
+  // Check if a pre-existing cookie file was mounted/supplied
+  const loaded = await loadPersistedCookie()
+  if (!loaded) {
+    // Initial fetch on startup in background if no valid cookie loaded
+    refreshCookie().catch(() => {})
+  }
 
   // Set recurring interval
   setInterval(() => {
