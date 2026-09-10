@@ -113,10 +113,13 @@ function updateDataDomeCookie(cookie: string | null, reason = "", engineName = "
     const clean = cleanDataDomeCookie(cookie)
     cachedDataDome = clean
     ;(globalThis as any)[GLOBAL_COOKIE_KEY] = clean
+    ;(globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY] = clean
     console.log(`[${engineName}] DataDome cookie updated [${reason}]: ${maskCookie(clean)}`)
   } else {
     cachedDataDome = null
     delete (globalThis as any)[GLOBAL_COOKIE_KEY]
+    delete (globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY]
+    delete (globalThis as any)[GLOBAL_SIDECAR_FETCH_TIME_KEY]
     console.log(`[${engineName}] DataDome cookie cleared [${reason}]`)
   }
 }
@@ -137,11 +140,23 @@ function getActiveDataDomeCookie(
   if (typeof globalCookie === "string" && globalCookie.trim()) {
     return { cookie: globalCookie.trim(), source: "shared-cache" }
   }
+  const sidecarCookie = (globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY]
+  if (typeof sidecarCookie === "string" && sidecarCookie.trim()) {
+    return { cookie: sidecarCookie.trim(), source: "sidecar-cache" }
+  }
   if (cachedDataDome && cachedDataDome.trim()) {
     return { cookie: cachedDataDome.trim(), source: "local-cache" }
   }
   if (cleanConfigured) {
     return { cookie: cleanConfigured, source: "settings" }
+  }
+  if (typeof process !== "undefined") {
+    const envCookie = cleanDataDomeCookie(
+      process.env?.QWANT_COOKIE || process.env?.QWANT_DATADOME_COOKIE
+    )
+    if (envCookie) {
+      return { cookie: envCookie, source: "env" }
+    }
   }
   return { cookie: "", source: "none" }
 }
@@ -150,6 +165,75 @@ const GLOBAL_SIDECAR_COOKIE_KEY = "__degoog_qwant_sidecar_cookie"
 const GLOBAL_SIDECAR_UA_KEY = "__degoog_qwant_sidecar_ua"
 const GLOBAL_SIDECAR_FETCH_TIME_KEY = "__degoog_qwant_sidecar_fetch_time"
 
+function getEffectiveSidecarUrl(context?: any, engineInstance?: any): string {
+  const fromSettings =
+    typeof context?.settings?.cookieServerUrl === "string"
+      ? context.settings.cookieServerUrl.trim()
+      : ""
+  if (fromSettings) return fromSettings
+
+  const fromInstance =
+    typeof engineInstance?.cookieServerUrl === "string"
+      ? engineInstance.cookieServerUrl.trim()
+      : ""
+  if (fromInstance) return fromInstance
+
+  const fromEngine =
+    typeof engine.cookieServerUrl === "string"
+      ? engine.cookieServerUrl.trim()
+      : ""
+  if (fromEngine) return fromEngine
+
+  if (typeof process !== "undefined") {
+    const fromEnv =
+      process.env?.QWANT_COOKIE_SERVER_URL?.trim() ||
+      process.env?.COOKIE_SERVER_URL?.trim()
+    if (fromEnv) return fromEnv
+  }
+  return ""
+}
+
+function getEffectiveSidecarFile(context?: any, engineInstance?: any): string {
+  const fromSettings =
+    typeof context?.settings?.cookieFilePath === "string"
+      ? context.settings.cookieFilePath.trim()
+      : ""
+  if (fromSettings) return fromSettings
+
+  const fromInstance =
+    typeof engineInstance?.cookieFilePath === "string"
+      ? engineInstance.cookieFilePath.trim()
+      : ""
+  if (fromInstance) return fromInstance
+
+  const fromEngine =
+    typeof engine.cookieFilePath === "string"
+      ? engine.cookieFilePath.trim()
+      : ""
+  if (fromEngine) return fromEngine
+
+  if (typeof process !== "undefined") {
+    const fromEnv =
+      process.env?.QWANT_COOKIE_FILE?.trim() ||
+      process.env?.COOKIE_FILE?.trim()
+    if (fromEnv) return fromEnv
+  }
+  return ""
+}
+
+function getSidecarEndpoints(rawUrl: string): { cookieUrl: string; refreshUrl: string } {
+  let base = rawUrl.trim().replace(/\/+$/, "")
+  if (base.endsWith("/cookie")) {
+    base = base.slice(0, -7).replace(/\/+$/, "")
+  } else if (base.endsWith("/refresh")) {
+    base = base.slice(0, -8).replace(/\/+$/, "")
+  }
+  return {
+    cookieUrl: `${base}/cookie`,
+    refreshUrl: `${base}/refresh`,
+  }
+}
+
 async function syncWithSidecar(
   serverUrl?: string,
   filePath?: string,
@@ -157,15 +241,15 @@ async function syncWithSidecar(
   engineName = "Qwant Videos"
 ): Promise<{ cookie: string; userAgent: string } | null> {
   const effectiveUrl =
-    serverUrl?.trim() ||
+    (typeof serverUrl === "string" && serverUrl.trim()) ||
     (typeof process !== "undefined"
-      ? process.env?.QWANT_COOKIE_SERVER_URL?.trim()
+      ? (process.env?.QWANT_COOKIE_SERVER_URL?.trim() || process.env?.COOKIE_SERVER_URL?.trim())
       : "") ||
     ""
   const effectiveFile =
-    filePath?.trim() ||
+    (typeof filePath === "string" && filePath.trim()) ||
     (typeof process !== "undefined"
-      ? process.env?.QWANT_COOKIE_FILE?.trim()
+      ? (process.env?.QWANT_COOKIE_FILE?.trim() || process.env?.COOKIE_FILE?.trim())
       : "") ||
     ""
 
@@ -178,16 +262,26 @@ async function syncWithSidecar(
 
   // Re-use cached sidecar cookie for up to 60s unless force is requested
   if (!force && cachedCookie && now - lastFetch < 60000) {
+    ;(globalThis as any)[GLOBAL_COOKIE_KEY] = cachedCookie
+    cachedDataDome = cachedCookie
+    if (cachedUa) {
+      ;(globalThis as any)[GLOBAL_UA_KEY] = cachedUa
+    }
     return { cookie: cachedCookie, userAgent: cachedUa || "" }
   }
 
   // 1. Try HTTP Sidecar endpoint
   if (effectiveUrl) {
+    const endpoints = getSidecarEndpoints(effectiveUrl)
+    const target = force ? endpoints.refreshUrl : endpoints.cookieUrl
+    const method = force ? "POST" : "GET"
+
     try {
-      const target = effectiveUrl.endsWith("/cookie")
-        ? effectiveUrl
-        : `${effectiveUrl.replace(/\/$/, "")}/cookie`
-      const res = await fetch(target, { signal: AbortSignal.timeout(3000) })
+      console.log(`[${engineName}] Sidecar HTTP ${method}: ${target}`)
+      const res = await fetch(target, {
+        method,
+        signal: AbortSignal.timeout(10000),
+      })
       if (res.ok) {
         const data: any = await res.json()
         const cookie = cleanDataDomeCookie(data.cookie || data.datadome)
@@ -196,16 +290,20 @@ async function syncWithSidecar(
           ;(globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY] = cookie
           ;(globalThis as any)[GLOBAL_SIDECAR_UA_KEY] = ua
           ;(globalThis as any)[GLOBAL_SIDECAR_FETCH_TIME_KEY] = now
-          updateDataDomeCookie(cookie, "sidecar-http-sync", engineName)
+          updateDataDomeCookie(cookie, force ? "sidecar-http-refresh" : "sidecar-http-sync", engineName)
           if (ua) {
             ;(globalThis as any)[GLOBAL_UA_KEY] = ua
           }
           return { cookie, userAgent: ua }
+        } else {
+          console.warn(`[${engineName}] Sidecar responded ${res.status} but returned no DataDome cookie`)
         }
+      } else {
+        console.warn(`[${engineName}] Sidecar HTTP responded with status ${res.status}: ${res.statusText}`)
       }
     } catch (err: any) {
       console.warn(
-        `[${engineName}] Sidecar HTTP sync failed (${effectiveUrl}): ${err?.message || err}`
+        `[${engineName}] Sidecar HTTP sync failed (${target}): ${err?.message || err}`
       )
     }
   }
@@ -235,24 +333,35 @@ async function syncWithSidecar(
     }
   }
 
-  return cachedCookie ? { cookie: cachedCookie, userAgent: cachedUa || "" } : null
+  if (cachedCookie) {
+    ;(globalThis as any)[GLOBAL_COOKIE_KEY] = cachedCookie
+    cachedDataDome = cachedCookie
+    if (cachedUa) {
+      ;(globalThis as any)[GLOBAL_UA_KEY] = cachedUa
+    }
+    return { cookie: cachedCookie, userAgent: cachedUa || "" }
+  }
+
+  return null
 }
 
 function triggerSidecarRefresh(serverUrl?: string, engineName = "Qwant Videos") {
   const effectiveUrl =
-    serverUrl?.trim() ||
+    (typeof serverUrl === "string" && serverUrl.trim()) ||
     (typeof process !== "undefined"
-      ? process.env?.QWANT_COOKIE_SERVER_URL?.trim()
+      ? (process.env?.QWANT_COOKIE_SERVER_URL?.trim() || process.env?.COOKIE_SERVER_URL?.trim())
       : "") ||
     ""
   if (!effectiveUrl) return
 
-  const target = `${effectiveUrl.replace(/\/cookie\/?$/, "").replace(/\/$/, "")}/refresh`
+  const { refreshUrl } = getSidecarEndpoints(effectiveUrl)
   console.log(
-    `[${engineName}] Requesting immediate background cookie refresh from sidecar: ${target}`
+    `[${engineName}] Requesting immediate background cookie refresh from sidecar: ${refreshUrl}`
   )
-  fetch(target, { method: "POST", signal: AbortSignal.timeout(4000) }).catch(
-    () => {}
+  fetch(refreshUrl, { method: "POST", signal: AbortSignal.timeout(5000) }).catch(
+    (err) => {
+      console.warn(`[${engineName}] Failed to trigger sidecar refresh (${refreshUrl}): ${err?.message || err}`)
+    }
   )
 }
 
@@ -310,6 +419,14 @@ function getEffectiveUserAgent(context?: any, configuredUa?: string): string {
   const globalUa = (globalThis as any)[GLOBAL_UA_KEY]
   if (typeof globalUa === "string" && globalUa.trim()) {
     return globalUa.trim()
+  }
+  const sidecarUa = (globalThis as any)[GLOBAL_SIDECAR_UA_KEY]
+  if (typeof sidecarUa === "string" && sidecarUa.trim()) {
+    return sidecarUa.trim()
+  }
+  if (typeof process !== "undefined") {
+    const envUa = process.env?.QWANT_USER_AGENT?.trim()
+    if (envUa) return envUa
   }
   if (typeof context?.userAgent === "function") {
     try {
@@ -479,12 +596,8 @@ export const engine = {
 
       const url = `https://api.qwant.com/v3/search/videos?${params.toString()}`
 
-      const sidecarUrl =
-        context?.settings?.cookieServerUrl ??
-        (this?.cookieServerUrl ?? engine.cookieServerUrl)
-      const sidecarFile =
-        context?.settings?.cookieFilePath ??
-        (this?.cookieFilePath ?? engine.cookieFilePath)
+      const sidecarUrl = getEffectiveSidecarUrl(context, this)
+      const sidecarFile = getEffectiveSidecarFile(context, this)
 
       if (sidecarUrl || sidecarFile) {
         await syncWithSidecar(sidecarUrl, sidecarFile, false, engineName)
@@ -565,7 +678,30 @@ export const engine = {
           `Purging rolling cache.`
         )
         updateDataDomeCookie(null, "challenge-403", engineName)
-        if (sidecarUrl) {
+
+        // If sidecar is available and this isn't already a retry, request fresh cookie and retry once
+        if ((sidecarUrl || sidecarFile) && !context?._qwantRetry) {
+          console.log(
+            `[${engineName}] Requesting fresh cookie from sidecar after HTTP 403...`
+          )
+          const refreshed = await syncWithSidecar(
+            sidecarUrl,
+            sidecarFile,
+            true,
+            engineName
+          )
+          if (refreshed?.cookie) {
+            console.log(
+              `[${engineName}] Retrying search with refreshed sidecar cookie...`
+            )
+            return await (this?.executeSearch ?? engine.executeSearch)(
+              query,
+              page,
+              timeFilter,
+              { ...context, _qwantRetry: true }
+            )
+          }
+        } else if (sidecarUrl) {
           triggerSidecarRefresh(sidecarUrl, engineName)
         }
         let isDataDome = response.headers.get("x-datadome") === "protected"
