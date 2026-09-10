@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  degoog:
+    image: ghcr.io/degoog-org/degoog:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - QWANT_COOKIE_SERVER_URL=http://qwant-sidecar:3005/cookie
+    volumes:
+      - /path/to/degoog-extensions:/app/extensions
+    depends_on:
+      - qwant-sidecar
+
+  qwant-sidecar:
+    image: ghcr.io/paiou/qwant-cookie-sidecar:latest
+    container_name: qwant-cookie-sidecar
+    environment:
+      - PORT=3005
+      - REFRESH_INTERVAL_MINUTES=25
+    restart: unless-stopped
+    # If not using Docker internal network DNS, you can expose the port:
+    # ports:
+    #   - "3005:3005"

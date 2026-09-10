@@ -138,6 +138,116 @@ function getActiveDataDomeCookie(
   return { cookie: "", source: "none" }
 }
 
+const GLOBAL_SIDECAR_COOKIE_KEY = "__degoog_qwant_sidecar_cookie"
+const GLOBAL_SIDECAR_UA_KEY = "__degoog_qwant_sidecar_ua"
+const GLOBAL_SIDECAR_FETCH_TIME_KEY = "__degoog_qwant_sidecar_fetch_time"
+
+async function syncWithSidecar(
+  serverUrl?: string,
+  filePath?: string,
+  force = false,
+  engineName = "Qwant News"
+): Promise<{ cookie: string; userAgent: string } | null> {
+  const effectiveUrl =
+    serverUrl?.trim() ||
+    (typeof process !== "undefined"
+      ? process.env?.QWANT_COOKIE_SERVER_URL?.trim()
+      : "") ||
+    ""
+  const effectiveFile =
+    filePath?.trim() ||
+    (typeof process !== "undefined"
+      ? process.env?.QWANT_COOKIE_FILE?.trim()
+      : "") ||
+    ""
+
+  if (!effectiveUrl && !effectiveFile) return null
+
+  const now = Date.now()
+  const lastFetch = (globalThis as any)[GLOBAL_SIDECAR_FETCH_TIME_KEY] || 0
+  const cachedCookie = (globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY]
+  const cachedUa = (globalThis as any)[GLOBAL_SIDECAR_UA_KEY]
+
+  // Re-use cached sidecar cookie for up to 60s unless force is requested
+  if (!force && cachedCookie && now - lastFetch < 60000) {
+    return { cookie: cachedCookie, userAgent: cachedUa || "" }
+  }
+
+  // 1. Try HTTP Sidecar endpoint
+  if (effectiveUrl) {
+    try {
+      const target = effectiveUrl.endsWith("/cookie")
+        ? effectiveUrl
+        : `${effectiveUrl.replace(/\/$/, "")}/cookie`
+      const res = await fetch(target, { signal: AbortSignal.timeout(3000) })
+      if (res.ok) {
+        const data: any = await res.json()
+        const cookie = cleanDataDomeCookie(data.cookie || data.datadome)
+        const ua = data.userAgent?.trim() || ""
+        if (cookie) {
+          ;(globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY] = cookie
+          ;(globalThis as any)[GLOBAL_SIDECAR_UA_KEY] = ua
+          ;(globalThis as any)[GLOBAL_SIDECAR_FETCH_TIME_KEY] = now
+          updateDataDomeCookie(cookie, "sidecar-http-sync", engineName)
+          if (ua) {
+            ;(globalThis as any)[GLOBAL_UA_KEY] = ua
+          }
+          return { cookie, userAgent: ua }
+        }
+      }
+    } catch (err: any) {
+      console.warn(
+        `[${engineName}] Sidecar HTTP sync failed (${effectiveUrl}): ${err?.message || err}`
+      )
+    }
+  }
+
+  // 2. Try file path
+  if (effectiveFile) {
+    try {
+      const fs = await import("fs/promises")
+      const content = await fs.readFile(effectiveFile, "utf-8")
+      const data = JSON.parse(content)
+      const cookie = cleanDataDomeCookie(data.cookie || data.datadome)
+      const ua = data.userAgent?.trim() || ""
+      if (cookie) {
+        ;(globalThis as any)[GLOBAL_SIDECAR_COOKIE_KEY] = cookie
+        ;(globalThis as any)[GLOBAL_SIDECAR_UA_KEY] = ua
+        ;(globalThis as any)[GLOBAL_SIDECAR_FETCH_TIME_KEY] = now
+        updateDataDomeCookie(cookie, "sidecar-file-sync", engineName)
+        if (ua) {
+          ;(globalThis as any)[GLOBAL_UA_KEY] = ua
+        }
+        return { cookie, userAgent: ua }
+      }
+    } catch (err: any) {
+      console.warn(
+        `[${engineName}] Sidecar file sync failed (${effectiveFile}): ${err?.message || err}`
+      )
+    }
+  }
+
+  return cachedCookie ? { cookie: cachedCookie, userAgent: cachedUa || "" } : null
+}
+
+function triggerSidecarRefresh(serverUrl?: string, engineName = "Qwant News") {
+  const effectiveUrl =
+    serverUrl?.trim() ||
+    (typeof process !== "undefined"
+      ? process.env?.QWANT_COOKIE_SERVER_URL?.trim()
+      : "") ||
+    ""
+  if (!effectiveUrl) return
+
+  const target = `${effectiveUrl.replace(/\/cookie\/?$/, "").replace(/\/$/, "")}/refresh`
+  console.log(
+    `[${engineName}] Requesting immediate background cookie refresh from sidecar: ${target}`
+  )
+  fetch(target, { method: "POST", signal: AbortSignal.timeout(4000) }).catch(
+    () => {}
+  )
+}
+
 function extractDataDomeCookie(response: any): string | null {
   if (!response?.headers) return null
 
@@ -210,6 +320,8 @@ export const engine = {
   safeSearch: "moderate",
   datadomeCookie: "",
   userAgent: "",
+  cookieServerUrl: "",
+  cookieFilePath: "",
 
   settingsSchema: [
     {
@@ -221,6 +333,22 @@ export const engine = {
       advanced: true,
       description:
         "Select an outgoing transport. 'curl-impersonate' (pre-installed in Degoog) is recommended on residential IPs to match browser TLS fingerprints and bypass DataDome.",
+    },
+    {
+      key: "cookieServerUrl",
+      label: "Cookie Sidecar URL",
+      type: "text",
+      advanced: true,
+      description:
+        "Optional URL of a local Qwant cookie sidecar (e.g. http://qwant-sidecar:3005/cookie or http://localhost:3005/cookie) that runs headless Chromium to auto-refresh DataDome cookies without slowing down searches.",
+    },
+    {
+      key: "cookieFilePath",
+      label: "Cookie Sidecar File Path",
+      type: "text",
+      advanced: true,
+      description:
+        "Optional path to a shared JSON file containing { datadome, userAgent } written by a sidecar service or cron job.",
     },
     {
       key: "datadomeCookie",
@@ -254,6 +382,16 @@ export const engine = {
     if (typeof settings?.safeSearch === "string") {
       this.safeSearch = settings.safeSearch
       engine.safeSearch = settings.safeSearch
+    }
+    if (typeof settings?.cookieServerUrl === "string") {
+      const u = settings.cookieServerUrl.trim()
+      this.cookieServerUrl = u
+      engine.cookieServerUrl = u
+    }
+    if (typeof settings?.cookieFilePath === "string") {
+      const f = settings.cookieFilePath.trim()
+      this.cookieFilePath = f
+      engine.cookieFilePath = f
     }
     if (typeof settings?.userAgent === "string") {
       const ua = settings.userAgent.trim()
@@ -337,6 +475,17 @@ export const engine = {
 
       const url = `https://api.qwant.com/v3/search/news?${params.toString()}`
 
+      const sidecarUrl =
+        context?.settings?.cookieServerUrl ??
+        (this?.cookieServerUrl ?? engine.cookieServerUrl)
+      const sidecarFile =
+        context?.settings?.cookieFilePath ??
+        (this?.cookieFilePath ?? engine.cookieFilePath)
+
+      if (sidecarUrl || sidecarFile) {
+        await syncWithSidecar(sidecarUrl, sidecarFile, false, engineName)
+      }
+
       const configuredCookie = cleanDataDomeCookie(
         context?.settings?.datadomeCookie ??
         (this?.datadomeCookie ?? engine.datadomeCookie)
@@ -412,6 +561,9 @@ export const engine = {
           `Purging rolling cache.`
         )
         updateDataDomeCookie(null, "challenge-403", engineName)
+        if (sidecarUrl) {
+          triggerSidecarRefresh(sidecarUrl, engineName)
+        }
         let isDataDome = response.headers.get("x-datadome") === "protected"
         if (!isDataDome) {
           try {
@@ -433,7 +585,7 @@ export const engine = {
           if (context?.engineError) {
             throw context.engineError(
               "captcha",
-              `${this?.name ?? engine.name} returned a DataDome CAPTCHA challenge. Upstream requests from datacenter/server IPs are blocked by DataDome. To resolve: configure an anti-bot browser transport (such as lolcat-4play or Camoufox), route via a proxy, or provide a datadome cookie in engine settings.`,
+              `${this?.name ?? engine.name} returned a DataDome CAPTCHA challenge (HTTP 403). To resolve: configure a cookie sync sidecar (cookieServerUrl), run curl-impersonate on a clean residential IP, or configure an anti-bot browser transport.`,
               { httpStatus: 403, engine: this?.name ?? engine.name }
             )
           }

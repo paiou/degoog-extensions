@@ -1,0 +1,17 @@
+{
+  "name": "qwant-cookie-sync",
+  "version": "1.0.0",
+  "description": "Lightweight sidecar service to obtain and refresh DataDome cookies for Qwant search engines",
+  "main": "index.mjs",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "once": "node index.mjs --once"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}
