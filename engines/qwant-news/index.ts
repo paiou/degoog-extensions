@@ -54,7 +54,7 @@ function formatLocale(lang?: string): string {
 }
 
 export const description =
-  "Qwant news search engine. Note: Qwant uses bot protection on its search APIs. 'curl-impersonate' (pre-installed in Degoog) or a browser transport is recommended on residential IPs."
+  "Qwant news search engine. Directly queries Qwant's news search API. Note: Uses 'curl-impersonate' (default in Degoog) on residential IPs or an anti-bot browser transport to query without manual cookies."
 
 const GLOBAL_COOKIE_KEY = "__degoog_qwant_datadome_cookie"
 const GLOBAL_LAST_CONFIGURED_KEY = "__degoog_qwant_last_configured_cookie"
@@ -139,19 +139,50 @@ function getActiveDataDomeCookie(
 }
 
 function extractDataDomeCookie(response: any): string | null {
-  if (typeof response?.headers?.getSetCookie === "function") {
+  if (!response?.headers) return null
+
+  // 1. Fetch API getSetCookie()
+  if (typeof response.headers.getSetCookie === "function") {
     const cookies: string[] = response.headers.getSetCookie() || []
     for (const c of cookies) {
-      const m = c.match(/datadome=([^;]+)/)
+      const m = String(c).match(/datadome=([^;]+)/i)
       if (m) return m[1].trim()
     }
   }
-  const rawCookie =
-    response?.headers?.get?.("set-cookie") ||
-    response?.headers?.get?.("x-set-cookie") ||
-    ""
-  const m = rawCookie.match(/datadome=([^;]+)/)
-  return m ? m[1].trim() : null
+
+  // 2. Standard Headers.get()
+  if (typeof response.headers.get === "function") {
+    const raw =
+      response.headers.get("set-cookie") ||
+      response.headers.get("x-set-cookie") ||
+      ""
+    const m = String(raw).match(/datadome=([^;]+)/i)
+    if (m) return m[1].trim()
+  }
+
+  // 3. Headers.raw() (node-fetch style)
+  if (typeof response.headers.raw === "function") {
+    const rawMap = response.headers.raw() || {}
+    const list = rawMap["set-cookie"] || rawMap["x-set-cookie"] || []
+    for (const c of Array.isArray(list) ? list : [list]) {
+      const m = String(c).match(/datadome=([^;]+)/i)
+      if (m) return m[1].trim()
+    }
+  }
+
+  // 4. Plain object headers (e.g. { 'set-cookie': '...' } or { 'set-cookie': [...] })
+  const plain =
+    response.headers["set-cookie"] ||
+    response.headers["x-set-cookie"] ||
+    response.headers?._headers?.["set-cookie"]
+  if (plain) {
+    for (const c of Array.isArray(plain) ? plain : [plain]) {
+      const m = String(c).match(/datadome=([^;]+)/i)
+      if (m) return m[1].trim()
+    }
+  }
+
+  return null
 }
 
 function getEffectiveUserAgent(context?: any, configuredUa?: string): string {
@@ -195,8 +226,9 @@ export const engine = {
       key: "datadomeCookie",
       label: "DataDome Cookie",
       type: "password",
+      advanced: true,
       description:
-        "Optional: datadome cookie from your browser (inspect network requests on qwant.com to copy the datadome cookie value) to bypass challenges without a browser transport.",
+        "Optional fallback: DataDome cookie. When provided or renewed, it is passed in request headers by all transports. Note that manually copied cookies often fail with HTTP 403 because DataDome validates that your browser's exact IP and TLS fingerprint match.",
     },
     {
       key: "userAgent",
@@ -341,21 +373,23 @@ export const engine = {
 
       const response = await doFetch(url, { headers })
 
-      const setCookieHeader =
-        response.headers.get("set-cookie") ||
-        response.headers.get("x-set-cookie") ||
-        ""
+      const freshCookie = extractDataDomeCookie(response)
+      const rawSetCookie =
+        (typeof response.headers.getSetCookie === "function" && response.headers.getSetCookie().length > 0) ||
+        response.headers.get?.("set-cookie") ||
+        response.headers.get?.("x-set-cookie") ||
+        response.headers?.["set-cookie"] ||
+        response.headers?.["x-set-cookie"]
 
       console.log(
         `[${engineName}] Upstream response: status=${response.status} ${response.statusText || ""}. ` +
-        `x-datadome=${response.headers.get("x-datadome") || "none"}, ` +
-        `x-dd-b=${response.headers.get("x-dd-b") || "none"}, ` +
-        `set-cookie=${setCookieHeader ? "yes" : "no"}`
+        `x-datadome=${response.headers.get?.("x-datadome") || response.headers?.["x-datadome"] || "none"}, ` +
+        `x-dd-b=${response.headers.get?.("x-dd-b") || response.headers?.["x-dd-b"] || "none"}, ` +
+        `set-cookie=${rawSetCookie ? (freshCookie ? `yes [datadome: ${maskCookie(freshCookie)}]` : "yes [no datadome]") : "none"}`
       )
 
       // Update cached datadome cookie if returned by server on successful response
       if (response.ok || response.status < 400) {
-        const freshCookie = extractDataDomeCookie(response)
         if (freshCookie) {
           if (freshCookie.startsWith("~")) {
             console.log(
