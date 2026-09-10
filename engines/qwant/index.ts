@@ -1,4 +1,5 @@
 declare const process: any
+declare const Bun: any
 export const type = "web"
 
 const SAFE_SEARCH_MAP: Record<string, string> = {
@@ -59,6 +60,121 @@ let lastConfiguredCookie = ""
 
 const DEFAULT_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+
+const CHROME_BINARIES = [
+  "curl_chrome133a",
+  "curl_chrome136",
+  "curl_chrome131",
+  "curl_chrome120",
+  "curl_chrome116",
+  "curl_chrome107",
+  "curl_chrome104",
+  "curl_chrome100",
+  "curl-impersonate-chrome",
+] as const
+
+let _cachedChromeBinary: string | null = null
+
+function getChromeBinary(): string | null {
+  if (_cachedChromeBinary) return _cachedChromeBinary
+  for (const bin of CHROME_BINARIES) {
+    try {
+      if (typeof Bun !== "undefined" && Bun.spawnSync) {
+        const res = Bun.spawnSync([bin, "--version"])
+        if (res.exitCode === 0) {
+          _cachedChromeBinary = bin
+          return bin
+        }
+      } else if (typeof process !== "undefined") {
+        const cpMod = "child_process"
+        const cp: any = (process as any).getBuiltinModule?.(cpMod)
+        if (cp?.spawnSync) {
+          const res = cp.spawnSync(bin, ["--version"])
+          if (res.status === 0) {
+            _cachedChromeBinary = bin
+            return bin
+          }
+        }
+      }
+    } catch {}
+  }
+  return null
+}
+
+function parseCurlResponseText(raw: string): Response {
+  const matches = [...raw.matchAll(/(?:^|\r?\n)(HTTP\/[123](?:\.[0-9])?\s+(\d{3})[^\r\n]*)/g)]
+  if (!matches.length) {
+    return new Response(raw, { status: 502 })
+  }
+  const lastMatch = matches[matches.length - 1]
+  const prefixLen = lastMatch[0].startsWith("\r\n") ? 2 : (lastMatch[0].startsWith("\n") ? 1 : 0)
+  const lastHeaderStartIndex = lastMatch.index + prefixLen
+  const afterHeaderStart = raw.slice(lastHeaderStartIndex)
+  const delimMatch = afterHeaderStart.match(/\r?\n\r?\n/)
+  if (!delimMatch || delimMatch.index === undefined) {
+    return new Response("", { status: parseInt(lastMatch[2], 10) })
+  }
+  const headerText = afterHeaderStart.slice(0, delimMatch.index)
+  const bodyText = afterHeaderStart.slice(delimMatch.index + delimMatch[0].length)
+  const status = parseInt(lastMatch[2], 10)
+  const headers = new Headers()
+  for (const line of headerText.split(/\r?\n/).slice(1)) {
+    const colon = line.indexOf(":")
+    if (colon > 0) {
+      headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim())
+    }
+  }
+  return new Response(bodyText, { status, headers })
+}
+
+async function fetchWithDirectChrome(
+  binary: string,
+  url: string,
+  headers: Record<string, string>,
+  proxyUrl?: string,
+  timeoutMs = 20000
+): Promise<Response> {
+  const timeoutSec = Math.max(1, Math.min(60, Math.round(timeoutMs / 1000)))
+  const args = [
+    "-sS",
+    "-L",
+    "--max-redirs",
+    "5",
+    "--max-time",
+    String(timeoutSec),
+    "-i",
+  ]
+
+  if (proxyUrl?.trim()) {
+    args.push("--proxy", proxyUrl.trim())
+  }
+
+  for (const [k, v] of Object.entries(headers)) {
+    if (!k.trim()) continue
+    args.push("-H", `${k.replace(/[\r\n]/g, "")}: ${String(v).replace(/[\r\n]/g, "")}`)
+  }
+
+  args.push("--", url)
+
+  if (typeof Bun !== "undefined" && Bun.spawn) {
+    const proc = Bun.spawn([binary, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stdoutBuf, errText, exitCode] = await Promise.all([
+      Bun.readableStreamToBytes(proc.stdout),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    if (exitCode !== 0) {
+      throw new Error(errText.trim() || `${binary} exited with status ${exitCode}`)
+    }
+    const raw = new TextDecoder().decode(stdoutBuf)
+    return parseCurlResponseText(raw)
+  }
+
+  throw new Error("Bun runtime required for direct curl execution")
+}
 
 function cleanDataDomeCookie(raw?: string): string {
   if (!raw || typeof raw !== "string") return ""
@@ -441,6 +557,7 @@ export const engine = {
   name: "Qwant",
   bangShortcut: "qwant",
   safeSearch: "moderate",
+  outgoingTransport: "curl-impersonate-chrome",
   datadomeCookie: "",
   userAgent: "",
   cookieServerUrl: "",
@@ -511,6 +628,10 @@ export const engine = {
     if (typeof settings?.safeSearch === "string") {
       this.safeSearch = settings.safeSearch
       engine.safeSearch = settings.safeSearch
+    }
+    if (typeof settings?.outgoingTransport === "string") {
+      this.outgoingTransport = settings.outgoingTransport
+      engine.outgoingTransport = settings.outgoingTransport
     }
     if (typeof settings?.cookieServerUrl === "string") {
       const u = settings.cookieServerUrl.trim()
@@ -658,7 +779,37 @@ export const engine = {
         ...(activeCookie ? { Cookie: `datadome=${activeCookie}` } : {}),
       }
 
-      const response = await doFetch(url, { headers })
+      const outgoingTransportSetting =
+        context?.settings?.outgoingTransport ??
+        (this?.outgoingTransport ?? engine.outgoingTransport)
+
+      const chromeBin = getChromeBinary()
+      const useDirectChrome =
+        chromeBin !== null &&
+        (!outgoingTransportSetting ||
+          outgoingTransportSetting === "curl-impersonate-chrome")
+
+      let response: Response
+      if (useDirectChrome && chromeBin) {
+        console.log(`[${engineName}] Fetching via direct ${chromeBin} transport`)
+        try {
+          response = await fetchWithDirectChrome(
+            chromeBin,
+            url,
+            headers,
+            context?.proxyUrl
+          )
+        } catch (err: any) {
+          console.warn(
+            `[${engineName}] Direct ${chromeBin} failed (${err?.message || err}), falling back to context fetch`
+          )
+          const doFetch = context?.fetch ?? fetch
+          response = await doFetch(url, { headers })
+        }
+      } else {
+        const doFetch = context?.fetch ?? fetch
+        response = await doFetch(url, { headers })
+      }
 
       const freshCookie = extractDataDomeCookie(response)
       const headersAny = response.headers as any

@@ -296,10 +296,9 @@ async function fetchCookieFromBrowser() {
         // networkidle2 might timeout if long-polling or analytics keep running; proceed to check
       })
 
-    // Wait up to 10s for API response if not already seen
+    // Wait up to 15s for API response or DataDome tag execution
     const waitStart = Date.now()
-    while (Date.now() - waitStart < 10000 && !searchApiOk) {
-      if (observedApiStatus === 403) break
+    while (Date.now() - waitStart < 15000 && !searchApiOk) {
       await new Promise((r) => setTimeout(r, 1000))
     }
 
@@ -313,6 +312,7 @@ async function fetchCookieFromBrowser() {
           const res = await fetch(
             "https://api.qwant.com/v3/search/web?q=qwant&count=1&locale=en_US&offset=0&device=desktop&safesearch=1&tgp=1&displayed=true&llm=true",
             {
+              credentials: "include",
               headers: {
                 Accept: "application/json, text/plain, */*",
                 Referer: "https://www.qwant.com/",
@@ -333,13 +333,14 @@ async function fetchCookieFromBrowser() {
       .catch((err) => ({ status: 0, ok: false, error: err.message }))
 
     console.log(
-      `[QwantSync] In-browser API check: status=${testResult.status}, ok=${testResult.ok}, isJson=${testResult.isJson}`
+      `[QwantSync] In-browser API check: status=${testResult.status}, ok=${testResult.ok}, isJson=${testResult.isJson}, observedApiOk=${searchApiOk}`
     )
 
-    if (testResult.status !== 200 || !testResult.isJson) {
-      latestState.lastError = `DataDome challenge active (HTTP ${testResult.status})`
+    const isVerified = (testResult.status === 200 && testResult.isJson) || searchApiOk
+    if (!isVerified) {
+      latestState.lastError = `DataDome challenge active (HTTP ${testResult.status || observedApiStatus})`
       throw new Error(
-        `DataDome blocked browser (HTTP ${testResult.status}). Refusing to capture unverified challenge cookie.`
+        `DataDome blocked browser (HTTP ${testResult.status || observedApiStatus}). Refusing to capture unverified challenge cookie.`
       )
     }
 
