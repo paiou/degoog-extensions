@@ -10,6 +10,9 @@ RUN apk add --no-cache \
     ttf-freefont
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV USER_DATA_DIR=/data/chromium-profile
+RUN mkdir -p /data/chromium-profile && chmod 777 /data/chromium-profile
+VOLUME /data
 
 WORKDIR /app
 

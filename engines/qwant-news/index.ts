@@ -393,7 +393,7 @@ async function syncWithSidecar(
       console.log(`[${engineName}] Sidecar HTTP ${method}: ${target}`)
       const res = await fetch(target, {
         method,
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(force ? 8000 : 2500),
       })
       if (res.ok) {
         const data: any = await res.json()
