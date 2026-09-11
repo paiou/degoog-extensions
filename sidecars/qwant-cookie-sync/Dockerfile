@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-common \
     xvfb \
+    xauth \
     x11-utils \
     fonts-liberation \
     fonts-dejavu-core \
@@ -51,4 +52,4 @@ COPY index.mjs ./
 EXPOSE 3005
 
 # Run under Xvfb virtual display for true headful rendering
-CMD ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24 -ac", "node", "index.mjs"]
+CMD ["xvfb-run", "-a", "-e", "/dev/stderr", "-s", "-screen 0 1920x1080x24 -ac +extension GLX -noreset", "node", "index.mjs"]

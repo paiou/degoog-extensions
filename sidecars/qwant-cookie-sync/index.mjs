@@ -98,24 +98,46 @@ async function fetchCookieFromBrowser() {
   console.log(
     `[QwantSync] Launching browser (headful: ${isHeadful}, display: ${process.env.DISPLAY || "none"}) using ${executablePath}...`
   )
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: isHeadful ? false : "new",
-    userDataDir: USER_DATA_DIR,
-    ignoreDefaultArgs: ["--enable-automation"],
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--disable-infobars",
-      "--window-size=1920,1080",
-      "--start-maximized",
-      "--lang=en-US,en",
-      "--enable-webgl",
-      "--ignore-gpu-blocklist",
-    ],
-  })
+
+  const defaultArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--window-size=1920,1080",
+    "--start-maximized",
+    "--lang=en-US,en",
+    "--enable-webgl",
+    "--ignore-gpu-blocklist",
+  ]
+
+  let browser
+  try {
+    browser = await puppeteer.launch({
+      executablePath,
+      headless: isHeadful ? false : "new",
+      userDataDir: USER_DATA_DIR,
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: defaultArgs,
+    })
+  } catch (launchErr) {
+    if (isHeadful) {
+      console.warn(
+        `[QwantSync] Headful launch failed (${launchErr.message}). Retrying with headless: "new"...`
+      )
+      browser = await puppeteer.launch({
+        executablePath,
+        headless: "new",
+        userDataDir: USER_DATA_DIR,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: defaultArgs,
+      })
+    } else {
+      throw launchErr
+    }
+  }
 
   try {
     const page = await browser.newPage()
