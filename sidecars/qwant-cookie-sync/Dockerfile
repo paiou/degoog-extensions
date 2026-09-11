@@ -47,9 +47,11 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY index.mjs ./
+COPY index.mjs entrypoint.sh ./
+RUN chmod +x ./entrypoint.sh
 
 EXPOSE 3005
 
-# Run under Xvfb virtual display for true headful rendering
-CMD ["xvfb-run", "-a", "-e", "/dev/stderr", "-s", "-screen 0 1920x1080x24 -ac +extension GLX -noreset", "node", "index.mjs"]
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["node", "index.mjs"]
+

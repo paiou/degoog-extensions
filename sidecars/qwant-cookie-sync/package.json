@@ -1,6 +1,6 @@
 {
   "name": "qwant-cookie-sync",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Lightweight sidecar service to obtain and refresh DataDome cookies for Qwant search engines",
   "main": "index.mjs",
   "type": "module",
